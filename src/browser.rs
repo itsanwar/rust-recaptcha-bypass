@@ -42,9 +42,11 @@ impl ChromeBrowser {
         
         // Launch Chrome with CDP enabled
         let child = Command::new(chrome_path)
+            .env("DBUS_SESSION_BUS_ADDRESS", "/dev/null") // Prevent D-Bus connection limits for UID 0
             .args(&[
                 format!("--remote-debugging-port={}", port),
                 format!("--user-data-dir={}", user_data_dir),
+                "--log-level=3".to_string(), // Suppress verbose C++ errors
                 if headless { "--headless" } else { "--headless=false" }.to_string(),
                 "--no-sandbox".to_string(),
                 "--disable-gpu".to_string(),
