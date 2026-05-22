@@ -97,18 +97,21 @@ impl HCA {
 /// Convenience function to create a browser instance with default size (1280x1024)
 pub async fn create_browser() -> anyhow::Result<ChromeBrowser> {
     let hca = HCA::new();
-    ChromeBrowser::new(hca.config.headless).await
+    let port = 9222 + (rand::random::<u32>() % 1000) as u16;
+    ChromeBrowser::new(hca.config.headless, port).await
 }
 
 /// Convenience function to create a browser instance with custom window size
 pub async fn create_browser_with_size(width: u32, height: u32) -> anyhow::Result<ChromeBrowser> {
     let hca = HCA::new();
-    ChromeBrowser::new_with_size(hca.config.headless, width, height).await
+    let port = 9222 + (rand::random::<u32>() % 1000) as u16;
+    ChromeBrowser::new_with_size(hca.config.headless, width, height, port).await
 }
 
 /// Convenience function to create a browser instance with custom size and headless mode
 pub async fn create_browser_with_config(headless: bool, width: u32, height: u32) -> anyhow::Result<ChromeBrowser> {
-    ChromeBrowser::new_with_size(headless, width, height).await
+    let port = 9222 + (rand::random::<u32>() % 1000) as u16;
+    ChromeBrowser::new_with_size(headless, width, height, port).await
 }
 
 /// Convenience function to create a web scraper

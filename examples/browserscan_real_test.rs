@@ -13,7 +13,8 @@ async fn main() -> Result<()> {
     fs::create_dir_all("docs/screenshots")?;
     
     // Create browser instance
-    let mut browser = create_browser().await?;
+    let headless = true;
+    let mut browser = ChromeBrowser::new(headless, 9222).await?;
     
     // Navigate to BrowserScan bot detection page
     println!("\n🌐 Navigating to BrowserScan bot detection...");

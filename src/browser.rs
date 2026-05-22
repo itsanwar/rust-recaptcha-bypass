@@ -17,11 +17,11 @@ pub struct ChromeBrowser {
 }
 
 impl ChromeBrowser {
-    pub async fn new(headless: bool) -> Result<Self> {
-        Self::new_with_size(headless, 1280, 1024).await
+    pub async fn new(headless: bool, port: u16) -> Result<Self> {
+        Self::new_with_size(headless, 1280, 1024, port).await
     }
     
-    pub async fn new_with_size(headless: bool, width: u32, height: u32) -> Result<Self> {
+    pub async fn new_with_size(headless: bool, width: u32, height: u32, port: u16) -> Result<Self> {
         let chrome_path = std::env::var("CHROME_PATH").unwrap_or_else(|_| {
             if cfg!(target_os = "windows") {
                 "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe".to_string()
@@ -31,7 +31,7 @@ impl ChromeBrowser {
                 "/usr/bin/google-chrome".to_string()
             }
         });
-        let port = 9222 + (rand::random::<u32>() % 1000) as u16;
+        
         let user_data_dir = format!("/tmp/chrome_hca_{}", port);
         
         // Clean up any existing profile

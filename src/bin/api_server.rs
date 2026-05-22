@@ -69,7 +69,8 @@ async fn main() {
             tokio::time::sleep(tokio::time::Duration::from_millis(i as u64 * 250)).await;
             
             println!("🚀 Starting worker {}/{}", i + 1, num_workers);
-            let browser = match ChromeBrowser::new(true).await {
+            let port = 9222 + i as u16;
+            let browser = match ChromeBrowser::new(true, port).await {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("Worker {} failed to start browser: {}", i, e);
