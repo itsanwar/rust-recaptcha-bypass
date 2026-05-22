@@ -125,7 +125,21 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
         // Just call grecaptcha.execute() directly — no script injection needed.
         format!(r#"
             new Promise((resolve, reject) => {{
-                const timer = setTimeout(() => reject('Timeout'), 15000);
+                const timer = setTimeout(() => reject('Timeout: execution exceeded 15s'), 15000);
+                
+                const origError = console.error;
+                const origWarn = console.warn;
+                const handleError = function(...args) {{
+                    const msg = args.join(' ');
+                    if (msg.toLowerCase().includes('site key') || msg.toLowerCase().includes('domain') || msg.toLowerCase().includes('invalid')) {{
+                        clearTimeout(timer);
+                        reject('Google ReCaptcha API Error: ' + msg);
+                    }}
+                    origError.apply(console, args);
+                }};
+                console.error = handleError;
+                console.warn = handleError;
+
                 window.grecaptcha.execute('{}', {{action: 'submit'}})
                     .then(token => {{ clearTimeout(timer); resolve(token); }})
                     .catch(e => {{ clearTimeout(timer); reject(e.toString()); }});
@@ -144,6 +158,21 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                 const TIMEOUT = 25000;
                 const timer = setTimeout(() => reject('Timeout: token generation exceeded 25s'), TIMEOUT);
                 const siteKey = '{}';
+
+                // EXPERT LEVEL: Intercept Google's internal errors (invalid site key, wrong domain, etc.)
+                // Because grecaptcha.execute() swallows errors and hangs forever if the key is bad!
+                const origError = console.error;
+                const origWarn = console.warn;
+                const handleError = function(...args) {{
+                    const msg = args.join(' ');
+                    if (msg.toLowerCase().includes('site key') || msg.toLowerCase().includes('domain') || msg.toLowerCase().includes('invalid')) {{
+                        clearTimeout(timer);
+                        reject('Google ReCaptcha API Error: ' + msg);
+                    }}
+                    origError.apply(console, args);
+                }};
+                console.error = handleError;
+                console.warn = handleError;
 
                 function doExecute() {{
                     window.grecaptcha.execute(siteKey, {{action: 'submit'}})
