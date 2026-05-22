@@ -22,13 +22,15 @@ impl ChromeBrowser {
     }
     
     pub async fn new_with_size(headless: bool, width: u32, height: u32) -> Result<Self> {
-        let chrome_path = if cfg!(target_os = "windows") {
-            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-        } else if cfg!(target_os = "macos") {
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        } else {
-            "/usr/bin/google-chrome"
-        };
+        let chrome_path = std::env::var("CHROME_PATH").unwrap_or_else(|_| {
+            if cfg!(target_os = "windows") {
+                "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe".to_string()
+            } else if cfg!(target_os = "macos") {
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string()
+            } else {
+                "/usr/bin/google-chrome".to_string()
+            }
+        });
         let port = 9222 + (rand::random::<u32>() % 1000) as u16;
         let user_data_dir = format!("/tmp/chrome_hca_{}", port);
         
