@@ -47,6 +47,7 @@ impl ChromeBrowser {
                 format!("--user-data-dir={}", user_data_dir),
                 if headless { "--headless" } else { "--headless=false" }.to_string(),
                 "--no-sandbox".to_string(),
+                "--disable-gpu".to_string(),
                 "--disable-dev-shm-usage".to_string(),
                 "--disable-blink-features=AutomationControlled".to_string(),
                 "--disable-features=VizDisplayCompositor".to_string(),
