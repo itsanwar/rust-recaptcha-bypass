@@ -140,9 +140,14 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                 console.error = handleError;
                 console.warn = handleError;
 
+                const execTimer = setTimeout(() => {{
+                    clearTimeout(timer);
+                    reject('Google ReCaptcha API Error: Invalid site_key, unauthorized domain, or Google dropped the request.');
+                }}, 7000);
+
                 window.grecaptcha.execute('{}', {{action: 'submit'}})
-                    .then(token => {{ clearTimeout(timer); resolve(token); }})
-                    .catch(e => {{ clearTimeout(timer); reject(e.toString()); }});
+                    .then(token => {{ clearTimeout(timer); clearTimeout(execTimer); resolve(token); }})
+                    .catch(e => {{ clearTimeout(timer); clearTimeout(execTimer); reject(e.toString()); }});
             }})
         "#, req.site_key)
     } else {
@@ -175,9 +180,16 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                 console.warn = handleError;
 
                 function doExecute() {{
+                    // Expert Level: If execution takes more than 7 seconds, Google has silently rejected the key.
+                    // Normal generation takes ~1 second. This prevents the 25s global hang.
+                    const execTimer = setTimeout(() => {{
+                        clearTimeout(timer);
+                        reject('Google ReCaptcha API Error: Invalid site_key, unauthorized domain, or Google dropped the request.');
+                    }}, 7000);
+
                     window.grecaptcha.execute(siteKey, {{action: 'submit'}})
-                        .then(token => {{ clearTimeout(timer); resolve(token); }})
-                        .catch(e => {{ clearTimeout(timer); reject('grecaptcha.execute failed: ' + e.toString()); }});
+                        .then(token => {{ clearTimeout(timer); clearTimeout(execTimer); resolve(token); }})
+                        .catch(e => {{ clearTimeout(timer); clearTimeout(execTimer); reject('grecaptcha.execute failed: ' + e.toString()); }});
                 }}
 
                 function poll() {{
