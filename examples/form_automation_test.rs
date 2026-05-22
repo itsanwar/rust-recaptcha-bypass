@@ -14,7 +14,13 @@ async fn main() -> Result<()> {
     
     // Launch Chrome
     println!("\n🚀 Launching Chrome for form filling test...");
-    let chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+    let chrome_path = if cfg!(target_os = "windows") {
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+    } else if cfg!(target_os = "macos") {
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    } else {
+        "/usr/bin/google-chrome"
+    };
     let port = 9233;
     let user_data = "/tmp/chrome_form_test";
     

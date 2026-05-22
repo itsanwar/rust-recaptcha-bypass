@@ -22,7 +22,13 @@ impl ChromeBrowser {
     }
     
     pub async fn new_with_size(headless: bool, width: u32, height: u32) -> Result<Self> {
-        let chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+        let chrome_path = if cfg!(target_os = "windows") {
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+        } else if cfg!(target_os = "macos") {
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        } else {
+            "/usr/bin/google-chrome"
+        };
         let port = 9222 + (rand::random::<u32>() % 1000) as u16;
         let user_data_dir = format!("/tmp/chrome_hca_{}", port);
         
@@ -83,6 +89,33 @@ impl ChromeBrowser {
         } else {
             Err(anyhow!("Failed to get Chrome websocket URL"))
         }
+    }
+    
+    pub async fn navigate_to_fast(&mut self, url: &str) -> Result<()> {
+        // Create a new target with the URL
+        let create_target_request = json!({
+            "id": 1,
+            "method": "Target.createTarget",
+            "params": {
+                "url": url
+            }
+        });
+        
+        let response = self.send_message(create_target_request).await?;
+        
+        if let Some(target_id) = response.get("result").and_then(|r| r.get("targetId")).and_then(|id| id.as_str()) {
+            self.target_id = Some(target_id.to_string());
+            
+            // Establish session for this target
+            match self.establish_session().await {
+                Ok(_) => println!("✅ Session established successfully"),
+                Err(e) => println!("⚠️ Session establishment failed: {}, but continuing...", e),
+            }
+            
+            return Ok(());
+        }
+        
+        Err(anyhow!("Failed to create Chrome target"))
     }
     
     pub async fn navigate_to(&mut self, url: &str) -> Result<()> {
@@ -311,24 +344,18 @@ impl ChromeBrowser {
                             write.send(Message::Text(enable_input_request.to_string())).await?;
                             
                             // Read all responses until we get past the Input.enable response
-                            let mut input_enabled = false;
                             while let Some(msg) = read.next().await {
                                 if let Ok(Message::Text(text)) = msg {
                                     if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
                                         // Check for Input.enable response
                                         if let Some(id) = response.get("id").and_then(|v| v.as_u64()) {
                                             if id == 53 {
-                                                input_enabled = true;
                                                 break;
                                             }
                                         }
                                         // Check for Runtime.executionContextCreated notification
                                         else if response.get("method").and_then(|m| m.as_str()) == Some("Runtime.executionContextCreated") {
                                             continue; // Skip this notification
-                                        }
-                                        // If we've enabled Input and this is the script evaluation response, break
-                                        else if input_enabled && response.get("id").and_then(|v| v.as_u64()) == Some(52) {
-                                            break;
                                         }
                                     }
                                 }
@@ -348,64 +375,65 @@ impl ChromeBrowser {
                             
                             write.send(Message::Text(evaluate_request.to_string())).await?;
                             
-                            // Read evaluation response
-                            if let Some(msg) = read.next().await {
+                            // Wait for the evaluation response (id: 52)
+                            while let Some(msg) = read.next().await {
                                 if let Ok(Message::Text(text)) = msg {
                                     if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
-                                        // Check if this is the Runtime.executionContextCreated notification
-                                        if response.get("method").and_then(|m| m.as_str()) == Some("Runtime.executionContextCreated") {
-                                            // Read the next message (Runtime.enable response)
-                                            if let Some(msg2) = read.next().await {
-                                                if let Ok(Message::Text(text2)) = msg2 {
-                                                    if let Ok(_enable_response) = serde_json::from_str::<serde_json::Value>(&text2) {
-                                                        // Read the next message (actual evaluation response)
-                                                        if let Some(msg3) = read.next().await {
-                                                            if let Ok(Message::Text(text3)) = msg3 {
-                                                                if let Ok(evaluation_response) = serde_json::from_str::<serde_json::Value>(&text3) {
-                                                                    if let Some(result) = evaluation_response.get("result") {
-                                                                        if let Some(inner_result) = result.get("result") {
-                                                                            if let Some(value) = inner_result.get("value") {
-                                                                                if let Some(text) = value.as_str() {
-                                                                                    return Ok(text.to_string());
-                                                                                } else if let Some(num) = value.as_f64() {
-                                                                                    return Ok(num.to_string());
-                                                                                } else if let Some(bool) = value.as_bool() {
-                                                                                    return Ok(bool.to_string());
-                                                                                } else if value.is_null() {
-                                                                                    return Ok("null".to_string());
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                    
-                                                                    if let Some(error) = evaluation_response.get("error") {
-                                                                        return Err(anyhow!("JavaScript execution error: {}", error));
-                                                                    }
-                                                                }
+                                        // We only care about the response to our evaluate request (id: 52)
+                                        if response.get("id").and_then(|id| id.as_u64()) == Some(52) {
+                                            if let Some(error) = response.get("error") {
+                                                return Err(anyhow!("JavaScript execution error: {}", error));
+                                            }
+                                            
+                                            if let Some(result) = response.get("result") {
+                                                if let Some(exception_details) = result.get("exceptionDetails") {
+                                                    // Try multiple paths to extract a useful error message
+                                                    let err_text = exception_details
+                                                        .get("exception")
+                                                        .and_then(|e| {
+                                                            e.get("description").and_then(|d| d.as_str())
+                                                                .or_else(|| e.get("value").and_then(|v| v.as_str()))
+                                                        })
+                                                        .or_else(|| exception_details.get("text").and_then(|t| t.as_str()));
+                                                    
+                                                    let msg = match err_text {
+                                                        Some(text) => text.to_string(),
+                                                        None => format!("Exception details: {}", exception_details),
+                                                    };
+                                                    return Err(anyhow!("JavaScript exception: {}", msg));
+                                                }
+                                                
+                                                if let Some(inner_result) = result.get("result") {
+                                                    if let Some(value) = inner_result.get("value") {
+                                                        if let Some(text) = value.as_str() {
+                                                            return Ok(text.to_string());
+                                                        } else if let Some(num) = value.as_f64() {
+                                                            return Ok(num.to_string());
+                                                        } else if let Some(bool) = value.as_bool() {
+                                                            return Ok(bool.to_string());
+                                                        } else if value.is_null() {
+                                                            return Ok("null".to_string());
+                                                        }
+                                                    } else {
+                                                        // Fallback if there is no primitive value (e.g., object)
+                                                        if inner_result.get("type").and_then(|t| t.as_str()) == Some("undefined") {
+                                                            return Ok("undefined".to_string());
+                                                        }
+                                                        if inner_result.get("type").and_then(|t| t.as_str()) == Some("object") {
+                                                            if inner_result.get("subtype").and_then(|s| s.as_str()) == Some("null") {
+                                                                return Ok("null".to_string());
+                                                            }
+                                                            // Return stringified object if possible
+                                                            if let Some(desc) = inner_result.get("description").and_then(|d| d.as_str()) {
+                                                                return Ok(desc.to_string());
                                                             }
                                                         }
                                                     }
                                                 }
                                             }
-                                        } else {
-                                            // This might be the evaluation response directly
-                                            if let Some(result) = response.get("result") {
-                                                if let Some(value) = result.get("value") {
-                                                    if let Some(text) = value.as_str() {
-                                                        return Ok(text.to_string());
-                                                    } else if let Some(num) = value.as_f64() {
-                                                        return Ok(num.to_string());
-                                                    } else if let Some(bool) = value.as_bool() {
-                                                        return Ok(bool.to_string());
-                                                    } else if value.is_null() {
-                                                        return Ok("null".to_string());
-                                                    }
-                                                }
-                                            }
                                             
-                                            if let Some(error) = response.get("error") {
-                                                return Err(anyhow!("JavaScript execution error: {}", error));
-                                            }
+                                            // Fallback if we couldn't parse the result
+                                            return Ok("null".to_string());
                                         }
                                     }
                                 }
@@ -419,6 +447,121 @@ impl ChromeBrowser {
         Ok("null".to_string())
     }
     
+    /// Fast script execution — skips Runtime.enable and Input.enable overhead.
+    /// Use for simple evaluations where you don't need mouse/input simulation.
+    pub async fn execute_script_fast(&mut self, script: &str) -> Result<String> {
+        if let Some(target_id) = &self.target_id {
+            let (ws_stream, _) = connect_async(&self.websocket_url).await?;
+            let (mut write, mut read) = ws_stream.split();
+            
+            // Attach to target
+            let attach_request = json!({
+                "id": 50,
+                "method": "Target.attachToTarget",
+                "params": {
+                    "targetId": target_id,
+                    "flatten": true
+                }
+            });
+            
+            write.send(Message::Text(attach_request.to_string())).await?;
+            
+            // Read messages until we get the attachToTarget response with a sessionId
+            let mut session_id_str = String::new();
+            while let Some(msg) = read.next().await {
+                if let Ok(Message::Text(text)) = msg {
+                    if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&text) {
+                        // The session ID comes in a Target.attachedToTarget event
+                        if let Some(sid) = resp.get("params")
+                            .and_then(|p| p.get("sessionId"))
+                            .and_then(|s| s.as_str())
+                        {
+                            session_id_str = sid.to_string();
+                            break;
+                        }
+                        // Or it might come directly in the result
+                        if let Some(sid) = resp.get("result")
+                            .and_then(|r| r.get("sessionId"))
+                            .and_then(|s| s.as_str())
+                        {
+                            session_id_str = sid.to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if session_id_str.is_empty() {
+                return Err(anyhow!("Failed to get session ID"));
+            }
+            
+            // Go straight to Runtime.evaluate — skip Runtime.enable and Input.enable
+            let evaluate_request = json!({
+                "id": 52,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": script,
+                    "returnByValue": true,
+                    "awaitPromise": true
+                },
+                "sessionId": session_id_str
+            });
+            
+            write.send(Message::Text(evaluate_request.to_string())).await?;
+            
+            // Wait for our response (id: 52), skip any notifications
+            while let Some(msg) = read.next().await {
+                if let Ok(Message::Text(text)) = msg {
+                    if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if response.get("id").and_then(|id| id.as_u64()) == Some(52) {
+                            if let Some(error) = response.get("error") {
+                                return Err(anyhow!("JavaScript execution error: {}", error));
+                            }
+                            
+                            if let Some(result) = response.get("result") {
+                                if let Some(exception_details) = result.get("exceptionDetails") {
+                                    let err_text = exception_details
+                                        .get("exception")
+                                        .and_then(|e| {
+                                            e.get("description").and_then(|d| d.as_str())
+                                                .or_else(|| e.get("value").and_then(|v| v.as_str()))
+                                        })
+                                        .or_else(|| exception_details.get("text").and_then(|t| t.as_str()));
+                                    
+                                    let msg = match err_text {
+                                        Some(text) => text.to_string(),
+                                        None => format!("Exception details: {}", exception_details),
+                                    };
+                                    return Err(anyhow!("JavaScript exception: {}", msg));
+                                }
+                                
+                                if let Some(inner_result) = result.get("result") {
+                                    if let Some(value) = inner_result.get("value") {
+                                        if let Some(text) = value.as_str() {
+                                            return Ok(text.to_string());
+                                        } else if let Some(num) = value.as_f64() {
+                                            return Ok(num.to_string());
+                                        } else if let Some(b) = value.as_bool() {
+                                            return Ok(b.to_string());
+                                        } else if value.is_null() {
+                                            return Ok("null".to_string());
+                                        }
+                                    }
+                                    if inner_result.get("type").and_then(|t| t.as_str()) == Some("undefined") {
+                                        return Ok("undefined".to_string());
+                                    }
+                                }
+                            }
+                            
+                            return Ok("null".to_string());
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok("null".to_string())
+    }
     /// Execute JavaScript with retry for bot detection bypass
     pub async fn execute_script_with_retry(&mut self, script: &str, max_retries: u32) -> Result<String> {
         let mut retries = 0;
