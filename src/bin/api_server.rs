@@ -217,21 +217,17 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
         // 🐢 COLD PATH: Need to reload page and inject recaptcha API fresh.
         // This only happens on the first request or when site_key/site_url changes.
 
-        // EXPERT OPTIMIZATION: Instead of navigate_to() which has 5 seconds of hardcoded sleep,
-        // we use native CDP Page.navigate. This securely sets the browser origin to the
-        // target domain (which Google needs) without loading any actual page resources or opening new tabs.
-        // Old: navigate_to() = 2s sleep + 3s sleep + page load = ~5s
-        // New: Page.navigate + 500ms wait = ~500ms
-        let _ = worker.browser.navigate_fast_cdp(&req.site_url).await;
+        // EXPERT OPTIMIZATION: Use navigate_to_fast() which uses CDP Target.createTarget
+        // with ZERO hardcoded sleeps (vs navigate_to's 2s + 3s = 5s of dead sleep).
+        let _ = worker.browser.navigate_to_fast(&req.site_url).await;
 
         format!(r#"
             new Promise((resolve, reject) => {{
-                const TIMEOUT = 25000;
-                const timer = setTimeout(() => reject('Timeout: token generation exceeded 25s'), TIMEOUT);
+                const TIMEOUT = 15000;
+                const timer = setTimeout(() => reject('Timeout: token generation exceeded 15s'), TIMEOUT);
                 const siteKey = '{}';
 
                 // EXPERT LEVEL: Intercept Google's internal errors (invalid site key, wrong domain, etc.)
-                // Because grecaptcha.execute() swallows errors and hangs forever if the key is bad!
                 const origError = console.error;
                 const origWarn = console.warn;
                 const handleError = function(...args) {{
@@ -246,8 +242,6 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                 console.warn = handleError;
 
                 function doExecute() {{
-                    // Expert Level: If execution takes more than 7 seconds, Google has silently rejected the key.
-                    // Normal generation takes ~1 second. This prevents the 25s global hang.
                     const execTimer = setTimeout(() => {{
                         clearTimeout(timer);
                         reject('Google ReCaptcha API Error: Invalid site_key, unauthorized domain, or Google dropped the request.');
@@ -266,11 +260,20 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                     }}
                 }}
 
-                const s = document.createElement('script');
-                s.src = 'https://www.google.com/recaptcha/api.js?render=' + siteKey;
-                s.onerror = () => {{ clearTimeout(timer); reject('Failed to load recaptcha api.js'); }};
-                document.head.appendChild(s);
-                poll();
+                // Wait for document.head to exist (page might still be loading after fast navigation)
+                function injectScript() {{
+                    const target = document.head || document.documentElement;
+                    if (target) {{
+                        const s = document.createElement('script');
+                        s.src = 'https://www.google.com/recaptcha/api.js?render=' + siteKey;
+                        s.onerror = () => {{ clearTimeout(timer); reject('Failed to load recaptcha api.js'); }};
+                        target.appendChild(s);
+                        poll();
+                    }} else {{
+                        setTimeout(injectScript, 50);
+                    }}
+                }}
+                injectScript();
             }})
         "#, req.site_key, req.action)
     };
