@@ -273,7 +273,7 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                     if (typeof window.grecaptcha !== 'undefined' && typeof window.grecaptcha.execute === 'function') {{
                         window.grecaptcha.ready(doExecute);
                     }} else {{
-                        setTimeout(poll, 100);
+                        setTimeout(poll, 10);
                     }}
                 }}
 
@@ -287,7 +287,7 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                         target.appendChild(s);
                         poll();
                     }} else {{
-                        setTimeout(injectScript, 50);
+                        setTimeout(injectScript, 10);
                     }}
                 }}
                 injectScript();
