@@ -217,9 +217,11 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
         // 🐢 COLD PATH: Need to reload page and inject recaptcha API fresh.
         // This only happens on the first request or when site_key/site_url changes.
 
-        // EXPERT OPTIMIZATION: Use navigate_to_fast() which uses CDP Target.createTarget
-        // with ZERO hardcoded sleeps (vs navigate_to's 2s + 3s = 5s of dead sleep).
-        let _ = worker.browser.navigate_to_fast(&req.site_url).await;
+        // EXPERT OPTIMIZATION: Use navigate_in_place() which navigates the EXISTING tab
+        // using CDP Page.navigate. Unlike navigate_to_fast (creates new tab = cold cache),
+        // this REUSES the same tab so DNS, TLS, and HTTP cache are all warm.
+        // After the first request, Google's api.js is served from Chrome's disk cache = instant.
+        let _ = worker.browser.navigate_in_place(&req.site_url).await;
 
         format!(r#"
             new Promise((resolve, reject) => {{

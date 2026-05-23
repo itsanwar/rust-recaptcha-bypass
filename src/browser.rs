@@ -126,6 +126,78 @@ impl ChromeBrowser {
         Err(anyhow!("Failed to create Chrome target"))
     }
     
+    /// Navigate the CURRENT tab to a new URL using CDP Page.navigate.
+    /// Unlike navigate_to_fast which creates a new tab (cold DNS/TLS/cache),
+    /// this reuses the existing tab so HTTP cache, DNS, and TLS are all warm.
+    /// This means api.js downloads once and is cached for all future requests.
+    pub async fn navigate_in_place(&mut self, url: &str) -> Result<()> {
+        if let Some(target_id) = &self.target_id {
+            let (ws_stream, _) = connect_async(&self.websocket_url).await?;
+            let (mut write, mut read) = ws_stream.split();
+            
+            // Attach to existing target
+            let attach_request = json!({
+                "id": 1,
+                "method": "Target.attachToTarget",
+                "params": {
+                    "targetId": target_id,
+                    "flatten": true
+                }
+            });
+            write.send(Message::Text(attach_request.to_string())).await?;
+            
+            // Get session ID
+            let mut session_id_str = String::new();
+            while let Some(msg) = read.next().await {
+                if let Ok(Message::Text(text)) = msg {
+                    if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(sid) = resp.get("params")
+                            .and_then(|p| p.get("sessionId"))
+                            .and_then(|s| s.as_str()) {
+                            session_id_str = sid.to_string();
+                            break;
+                        }
+                        if let Some(sid) = resp.get("result")
+                            .and_then(|r| r.get("sessionId"))
+                            .and_then(|s| s.as_str()) {
+                            session_id_str = sid.to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if session_id_str.is_empty() {
+                return Err(anyhow!("Failed to get session ID for navigation"));
+            }
+            
+            // Navigate using Page.navigate (reuses existing tab + caches)
+            let navigate_request = json!({
+                "id": 2,
+                "method": "Page.navigate",
+                "params": {
+                    "url": url
+                },
+                "sessionId": session_id_str
+            });
+            write.send(Message::Text(navigate_request.to_string())).await?;
+            
+            // Wait for navigation acknowledgment
+            while let Some(msg) = read.next().await {
+                if let Ok(Message::Text(text)) = msg {
+                    if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if resp.get("id").and_then(|id| id.as_u64()) == Some(2) {
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            return Ok(());
+        }
+        Err(anyhow!("No target to navigate"))
+    }
+    
     pub async fn navigate_to(&mut self, url: &str) -> Result<()> {
         // Wait a bit more for Chrome to be fully ready
         sleep(Duration::from_secs(2)).await;
