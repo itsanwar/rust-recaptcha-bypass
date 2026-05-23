@@ -13,6 +13,12 @@ use hca::ChromeBrowser;
 struct TokenRequest {
     site_url: String,
     site_key: String,
+    #[serde(default = "default_action")]
+    action: String,
+}
+
+fn default_action() -> String {
+    "submit".to_string()
 }
 
 #[derive(Serialize)]
@@ -31,6 +37,54 @@ struct TokenResponse {
     metrics: Option<ExecutionMetrics>,
 }
 
+#[derive(Deserialize, Debug)]
+struct CapSolverTask {
+    #[serde(rename = "type")]
+    task_type: String,
+    #[serde(rename = "websiteURL")]
+    website_url: String,
+    #[serde(rename = "websiteKey")]
+    website_key: String,
+    #[serde(rename = "pageAction", default = "default_action")]
+    page_action: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct CreateTaskRequest {
+    #[serde(rename = "clientKey", default)]
+    client_key: String,
+    task: CapSolverTask,
+}
+
+#[derive(Serialize, Clone)]
+struct CapSolverSolution {
+    #[serde(rename = "gRecaptchaResponse")]
+    g_recaptcha_response: String,
+}
+
+#[derive(Serialize, Clone)]
+struct CreateTaskResponse {
+    #[serde(rename = "errorId")]
+    error_id: i32,
+    #[serde(rename = "errorCode", skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+    #[serde(rename = "errorDescription", skip_serializing_if = "Option::is_none")]
+    error_description: Option<String>,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    solution: Option<CapSolverSolution>,
+    #[serde(rename = "taskId", skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GetTaskResultRequest {
+    #[serde(rename = "clientKey", default)]
+    client_key: String,
+    #[serde(rename = "taskId")]
+    task_id: String,
+}
+
 struct WorkerMessage {
     req: TokenRequest,
     resp_tx: oneshot::Sender<TokenResponse>,
@@ -38,12 +92,14 @@ struct WorkerMessage {
 
 struct AppState {
     tx: mpsc::Sender<WorkerMessage>,
+    tasks: std::sync::Mutex<std::collections::HashMap<String, CreateTaskResponse>>,
 }
 
 /// Per-worker state that tracks the cached recaptcha site_key to skip reloading.
 struct WorkerState {
     browser: ChromeBrowser,
     cached_site_key: Option<String>,
+    cached_site_url: Option<String>,
 }
 
 #[tokio::main]
@@ -81,6 +137,7 @@ async fn main() {
             let mut state = WorkerState {
                 browser,
                 cached_site_key: None,
+                cached_site_url: None,
             };
 
             // Pre-navigate to about:blank once
@@ -104,10 +161,15 @@ async fn main() {
         });
     }
 
-    let state = Arc::new(AppState { tx });
+    let state = Arc::new(AppState { 
+        tx,
+        tasks: std::sync::Mutex::new(std::collections::HashMap::new()),
+    });
 
     let app = Router::new()
         .route("/api/v1/generate-token", post(generate_token))
+        .route("/createTask", post(create_task))
+        .route("/getTaskResult", post(get_task_result))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
@@ -118,7 +180,8 @@ async fn main() {
 async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenResponse {
     let total_start = std::time::Instant::now();
 
-    let is_cached = worker.cached_site_key.as_deref() == Some(&req.site_key);
+    let is_cached = worker.cached_site_key.as_deref() == Some(&req.site_key) 
+        && worker.cached_site_url.as_deref() == Some(&req.site_url);
 
     let script = if is_cached {
         // ⚡ FAST PATH: recaptcha API is already loaded with this site_key.
@@ -145,18 +208,17 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                     reject('Google ReCaptcha API Error: Invalid site_key, unauthorized domain, or Google dropped the request.');
                 }}, 7000);
 
-                window.grecaptcha.execute('{}', {{action: 'submit'}})
+                window.grecaptcha.execute('{}', {{action: '{}'}})
                     .then(token => {{ clearTimeout(timer); clearTimeout(execTimer); resolve(token); }})
                     .catch(e => {{ clearTimeout(timer); clearTimeout(execTimer); reject(e.toString()); }});
             }})
-        "#, req.site_key)
+        "#, req.site_key, req.action)
     } else {
         // 🐢 COLD PATH: Need to reload page and inject recaptcha API fresh.
-        // This only happens on the first request or when site_key changes.
+        // This only happens on the first request or when site_key/site_url changes.
 
-        // Reload the blank page to clear old state
-        let _ = worker.browser.execute_script_fast("location.reload();").await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+        // Navigate to the correct domain! If we run on about:blank, Google rejects the token format.
+        let _ = worker.browser.navigate_to(&req.site_url).await;
 
         format!(r#"
             new Promise((resolve, reject) => {{
@@ -187,7 +249,7 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                         reject('Google ReCaptcha API Error: Invalid site_key, unauthorized domain, or Google dropped the request.');
                     }}, 7000);
 
-                    window.grecaptcha.execute(siteKey, {{action: 'submit'}})
+                    window.grecaptcha.execute(siteKey, {{action: '{}'}})
                         .then(token => {{ clearTimeout(timer); clearTimeout(execTimer); resolve(token); }})
                         .catch(e => {{ clearTimeout(timer); clearTimeout(execTimer); reject('grecaptcha.execute failed: ' + e.toString()); }});
                 }}
@@ -206,7 +268,7 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                 document.head.appendChild(s);
                 poll();
             }})
-        "#, req.site_key)
+        "#, req.site_key, req.action)
     };
 
     let script_start = std::time::Instant::now();
@@ -218,14 +280,16 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
             if token == "null" || token.is_empty() {
                 // Invalidate cache on failure
                 worker.cached_site_key = None;
+                worker.cached_site_url = None;
                 TokenResponse {
                     token: None,
                     error: Some(format!("Received empty token after {}ms", total_ms)),
                     metrics: None,
                 }
             } else {
-                // Cache this site_key for future fast-path requests
+                // Cache this site_key and site_url for future fast-path requests
                 worker.cached_site_key = Some(req.site_key.clone());
+                worker.cached_site_url = Some(req.site_url.clone());
                 let path = if is_cached { "⚡ cached" } else { "🐢 cold" };
                 println!("  ✅ [{}] Token in {}ms (script: {}ms, {} chars)", path, total_ms, script_ms, token.len());
                 TokenResponse {
@@ -244,6 +308,7 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
         },
         Err(e) => {
             worker.cached_site_key = None;
+            worker.cached_site_url = None;
             TokenResponse {
                 token: None,
                 error: Some(format!("Script execution failed: {}", e)),
@@ -278,5 +343,105 @@ async fn generate_token(
             error: Some("Internal server error: worker failed to respond".to_string()),
             metrics: None,
         }),
+    }
+}
+
+async fn create_task(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateTaskRequest>,
+) -> Json<CreateTaskResponse> {
+    let task_id = format!("{:032x}", rand::random::<u128>());
+
+    // Initialize task state as processing
+    {
+        let mut tasks = state.tasks.lock().unwrap();
+        tasks.insert(task_id.clone(), CreateTaskResponse {
+            error_id: 0,
+            error_code: None,
+            error_description: None,
+            status: "processing".to_string(),
+            solution: None,
+            task_id: Some(task_id.clone()),
+        });
+    }
+
+    let req = TokenRequest {
+        site_url: payload.task.website_url.clone(),
+        site_key: payload.task.website_key.clone(),
+        action: payload.task.page_action.clone(),
+    };
+
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let msg = WorkerMessage { req, resp_tx };
+
+    // Send task to worker pool
+    let tx_clone = state.tx.clone();
+    let state_clone = state.clone();
+    let task_id_clone = task_id.clone();
+
+    tokio::spawn(async move {
+        if tx_clone.send(msg).await.is_err() {
+            let mut tasks = state_clone.tasks.lock().unwrap();
+            if let Some(t) = tasks.get_mut(&task_id_clone) {
+                t.error_id = 1;
+                t.status = "failed".to_string();
+                t.error_description = Some("Worker pool overloaded".to_string());
+            }
+            return;
+        }
+
+        match resp_rx.await {
+            Ok(resp) => {
+                let mut tasks = state_clone.tasks.lock().unwrap();
+                if let Some(t) = tasks.get_mut(&task_id_clone) {
+                    if let Some(token) = resp.token {
+                        t.status = "ready".to_string();
+                        t.solution = Some(CapSolverSolution {
+                            g_recaptcha_response: token,
+                        });
+                    } else if let Some(err) = resp.error {
+                        t.error_id = 1;
+                        t.status = "failed".to_string();
+                        t.error_description = Some(err);
+                    }
+                }
+            }
+            Err(_) => {
+                let mut tasks = state_clone.tasks.lock().unwrap();
+                if let Some(t) = tasks.get_mut(&task_id_clone) {
+                    t.error_id = 1;
+                    t.status = "failed".to_string();
+                    t.error_description = Some("Internal worker error".to_string());
+                }
+            }
+        }
+    });
+
+    Json(CreateTaskResponse {
+        error_id: 0,
+        error_code: None,
+        error_description: None,
+        status: "idle".to_string(), // Initial status
+        solution: None,
+        task_id: Some(task_id),
+    })
+}
+
+async fn get_task_result(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<GetTaskResultRequest>,
+) -> Json<CreateTaskResponse> {
+    let tasks = state.tasks.lock().unwrap();
+    if let Some(task_resp) = tasks.get(&payload.task_id) {
+        Json(task_resp.clone())
+    } else {
+        Json(CreateTaskResponse {
+            error_id: 1,
+            error_code: Some("ERROR_TASK_NOT_FOUND".to_string()),
+            error_description: Some("Task not found".to_string()),
+            status: "failed".to_string(),
+            solution: None,
+            task_id: Some(payload.task_id),
+        })
     }
 }
