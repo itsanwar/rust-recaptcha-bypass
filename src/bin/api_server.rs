@@ -218,27 +218,11 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
         // This only happens on the first request or when site_key/site_url changes.
 
         // EXPERT OPTIMIZATION: Instead of navigate_to() which has 5 seconds of hardcoded sleep,
-        // we use execute_script_fast to navigate via JS. This sets the browser origin to the
-        // target domain (which Google needs) without loading any actual page resources.
+        // we use native CDP Page.navigate. This securely sets the browser origin to the
+        // target domain (which Google needs) without loading any actual page resources or opening new tabs.
         // Old: navigate_to() = 2s sleep + 3s sleep + page load = ~5s
-        // New: JS navigation + DOMContentLoaded wait = ~200-500ms
-        let nav_script = format!(
-            r#"
-            new Promise((resolve, reject) => {{
-                const timer = setTimeout(() => resolve('timeout'), 5000);
-                window.location.href = '{}';
-                const check = setInterval(() => {{
-                    if (document.readyState !== 'loading') {{
-                        clearInterval(check);
-                        clearTimeout(timer);
-                        resolve('ready');
-                    }}
-                }}, 50);
-            }})
-            "#,
-            req.site_url
-        );
-        let _ = worker.browser.execute_script_fast(&nav_script).await;
+        // New: Page.navigate + 500ms wait = ~500ms
+        let _ = worker.browser.navigate_fast_cdp(&req.site_url).await;
 
         format!(r#"
             new Promise((resolve, reject) => {{

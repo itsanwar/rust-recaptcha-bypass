@@ -159,6 +159,66 @@ impl ChromeBrowser {
         Err(anyhow!("Failed to create Chrome target"))
     }
     
+    pub async fn navigate_fast_cdp(&mut self, url: &str) -> Result<()> {
+        if let Some(target_id) = &self.target_id {
+            let (ws_stream, _) = connect_async(&self.websocket_url).await?;
+            let (mut write, mut read) = ws_stream.split();
+            
+            // Attach to target
+            let attach_request = json!({
+                "id": 100,
+                "method": "Target.attachToTarget",
+                "params": {
+                    "targetId": target_id,
+                    "flatten": true
+                }
+            });
+            
+            write.send(Message::Text(attach_request.to_string())).await?;
+            
+            // Read attach response
+            let mut session_id_str = String::new();
+            while let Some(msg) = read.next().await {
+                if let Ok(Message::Text(text)) = msg {
+                    if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(sid) = resp.get("params").and_then(|p| p.get("sessionId")).and_then(|s| s.as_str()) {
+                            session_id_str = sid.to_string();
+                            break;
+                        }
+                        if let Some(sid) = resp.get("result").and_then(|r| r.get("sessionId")).and_then(|s| s.as_str()) {
+                            session_id_str = sid.to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if session_id_str.is_empty() {
+                return Err(anyhow!("Failed to get session ID for navigation"));
+            }
+            
+            // Navigate the current page
+            let nav_request = json!({
+                "id": 101,
+                "method": "Page.navigate",
+                "params": {
+                    "url": url
+                },
+                "sessionId": session_id_str
+            });
+            
+            write.send(Message::Text(nav_request.to_string())).await?;
+            
+            // Just sleep 500ms for Chrome to commit the navigation internally
+            // This is 10x faster than the 5 seconds of sleep we had before
+            sleep(Duration::from_millis(500)).await;
+            
+            return Ok(());
+        }
+        
+        Err(anyhow!("No target_id to navigate"))
+    }
+
     /// Establish session with the target
     async fn establish_session(&mut self) -> Result<()> {
         if let Some(target_id) = &self.target_id {
