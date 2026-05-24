@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting HCA with URL: {}", url);
 
     // Create browser instance
-    let mut browser = ChromeBrowser::new(headless).await?;
+    let mut browser = ChromeBrowser::new(headless, 9222).await?;
     info!("Browser created successfully");
 
     // Navigate to URL
