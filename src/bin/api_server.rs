@@ -13,11 +13,11 @@ use hca::ChromeBrowser;
 struct TokenRequest {
     site_url: String,
     site_key: String,
-    #[serde(default = "default_action")]
+    #[serde(alias = "pageAction", default = "default_action")]
     action: String,
-    #[serde(default = "default_task_type")]
+    #[serde(alias = "type", default = "default_task_type")]
     task_type: String,
-    #[serde(default = "default_api_domain")]
+    #[serde(alias = "apiDomain", default = "default_api_domain")]
     api_domain: String,
 }
 
