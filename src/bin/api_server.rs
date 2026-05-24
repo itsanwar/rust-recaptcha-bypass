@@ -354,7 +354,15 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
 
     let script_start = std::time::Instant::now();
 
-    match worker.browser.execute_script_fast(&script).await {
+    // Use full execute_script for V2 (which needs Page domain for CSP bypass + Input domain)
+    // Use execute_script_fast for V3 (which just does a simple eval).
+    let exec_res = if is_v2 {
+        worker.browser.execute_script(&script).await
+    } else {
+        worker.browser.execute_script_fast(&script).await
+    };
+
+    match exec_res {
         Ok(token) => {
             let script_ms = script_start.elapsed().as_millis();
             let total_ms = total_start.elapsed().as_millis();
