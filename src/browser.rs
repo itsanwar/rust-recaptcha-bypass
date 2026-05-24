@@ -204,17 +204,30 @@ impl ChromeBrowser {
             });
             write.send(Message::Text(navigate_request.to_string())).await?;
             
-            // Wait for navigation acknowledgment
-            while let Some(msg) = read.next().await {
+            // Wait for navigation acknowledgment AND Page.loadEventFired
+            let mut nav_acked = false;
+            let mut load_fired = false;
+            
+            // Give it up to 10 seconds to load
+            let timeout = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            
+            while let Ok(Some(msg)) = tokio::time::timeout_at(timeout, read.next()).await {
                 if let Ok(Message::Text(text)) = msg {
                     if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&text) {
                         if resp.get("id").and_then(|id| id.as_u64()) == Some(2) {
+                            nav_acked = true;
+                        }
+                        if resp.get("method").and_then(|m| m.as_str()) == Some("Page.loadEventFired") {
+                            load_fired = true;
+                        }
+                        if nav_acked && load_fired {
                             break;
                         }
                     }
                 }
             }
             
+            // Even if we timed out waiting for load, we proceed. The page might be partially loaded.
             return Ok(());
         }
         Err(anyhow!("No target to navigate"))
