@@ -354,13 +354,8 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
 
     let script_start = std::time::Instant::now();
 
-    // Use full execute_script for V2 (which needs Page domain for CSP bypass + Input domain)
-    // Use execute_script_fast for V3 (which just does a simple eval).
-    let exec_res = if is_v2 {
-        worker.browser.execute_script(&script).await
-    } else {
-        worker.browser.execute_script_fast(&script).await
-    };
+    // Use full execute_script for ALL requests to ensure CSP bypass works.
+    let exec_res = worker.browser.execute_script(&script).await;
 
     match exec_res {
         Ok(token) => {
@@ -812,6 +807,8 @@ fn build_v2_audio_solver(site_key: &str, api_domain: &str) -> String {
                 // Attempt loop with refresh-on-failure
                 for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {{
                     try {{
+                        iwin = bframe.contentWindow;
+                        idoc = iwin.document;
                         const outcome = await solveOnce(idoc, iwin, attempt);
                         if (outcome.ok) return finish(outcome.token);
                         if (attempt < MAX_ATTEMPTS - 1) {{
