@@ -307,6 +307,16 @@ impl ChromeBrowser {
                                 next_id += 1;
                             }
                             
+                            // Bypass CSP globally so injected scripts (api.js) aren't blocked by the target site's CSP
+                            let bypass_csp_request = json!({
+                                "id": next_id,
+                                "method": "Page.setBypassCSP",
+                                "params": { "enabled": true },
+                                "sessionId": session_id
+                            });
+                            write.send(Message::Text(bypass_csp_request.to_string())).await?;
+                            let _ = read.next().await; // Consume response
+                            
                             return Ok(());
                         }
                     }
