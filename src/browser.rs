@@ -40,41 +40,50 @@ impl ChromeBrowser {
         }
         std::fs::create_dir_all(&user_data_dir)?;
         
+        let mut args = vec![
+            format!("--remote-debugging-port={}", port),
+            format!("--user-data-dir={}", user_data_dir),
+            "--log-level=3".to_string(), // Suppress verbose C++ errors
+            "--no-sandbox".to_string(),
+            "--disable-gpu".to_string(),
+            "--disable-software-rasterizer".to_string(),
+            "--disable-vulkan".to_string(),
+            "--disable-gl-drawing-for-tests".to_string(),
+            "--disable-dev-shm-usage".to_string(),
+            "--disable-blink-features=AutomationControlled".to_string(),
+            "--disable-features=VizDisplayCompositor".to_string(),
+            "--disable-web-security".to_string(),
+            "--disable-site-isolation-trials".to_string(),
+            "--disable-features=TranslateUI".to_string(),
+            "--disable-ipc-flooding-protection".to_string(),
+            "--disable-background-timer-throttling".to_string(),
+            "--disable-backgrounding-occluded-windows".to_string(),
+            "--disable-renderer-backgrounding".to_string(),
+            "--disable-plugins-discovery".to_string(),
+            "--disable-default-apps".to_string(),
+            "--disable-extensions".to_string(),
+            "--disable-component-extensions-with-background-pages".to_string(),
+            "--disable-background-networking".to_string(),
+            "--disable-sync".to_string(),
+            "--disable-default-browser-check".to_string(),
+            "--disable-features=TranslateUI,BlinkGenPropertyTrees".to_string(),
+            format!("--window-size={},{}", width, height),
+            "--force-device-scale-factor=1".to_string(),
+            "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36".to_string(),
+            "about:blank".to_string(),
+        ];
+
+        if headless {
+            // Instead of telling Chrome to be headless (which Google detects),
+            // we run it visually but shove the window completely off-screen!
+            // This grants 100% visible fingerprint while keeping the desktop clean.
+            args.push("--window-position=-10000,-10000".to_string());
+        }
+
         // Launch Chrome with CDP enabled
         let child = Command::new(chrome_path)
             .env("DBUS_SESSION_BUS_ADDRESS", "/dev/null") // Prevent D-Bus connection limits for UID 0
-            .args(&[
-                format!("--remote-debugging-port={}", port),
-                format!("--user-data-dir={}", user_data_dir),
-                "--log-level=3".to_string(), // Suppress verbose C++ errors
-                if headless { "--headless" } else { "--headless=false" }.to_string(),
-                "--no-sandbox".to_string(),
-                "--disable-gpu".to_string(),
-                "--disable-software-rasterizer".to_string(),
-                "--disable-vulkan".to_string(),
-                "--disable-gl-drawing-for-tests".to_string(),
-                "--disable-dev-shm-usage".to_string(),
-                "--disable-blink-features=AutomationControlled".to_string(),
-                "--disable-features=VizDisplayCompositor".to_string(),
-                "--disable-web-security".to_string(),
-                "--disable-features=TranslateUI".to_string(),
-                "--disable-ipc-flooding-protection".to_string(),
-                "--disable-background-timer-throttling".to_string(),
-                "--disable-backgrounding-occluded-windows".to_string(),
-                "--disable-renderer-backgrounding".to_string(),
-                "--disable-plugins-discovery".to_string(),
-                "--disable-default-apps".to_string(),
-                "--disable-extensions".to_string(),
-                "--disable-component-extensions-with-background-pages".to_string(),
-                "--disable-background-networking".to_string(),
-                "--disable-sync".to_string(),
-                "--disable-default-browser-check".to_string(),
-                "--disable-features=TranslateUI,BlinkGenPropertyTrees".to_string(),
-                format!("--window-size={},{}", width, height).to_string(),
-                "--force-device-scale-factor=1".to_string(),
-                "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36".to_string(),
-                "about:blank".to_string(),
-            ])
+            .args(&args)
             .spawn()?;
         
         // Wait for Chrome to start
@@ -423,13 +432,29 @@ impl ChromeBrowser {
                             
                             write.send(Message::Text(enable_input_request.to_string())).await?;
                             
-                            // Read all responses until we get past the Input.enable response
+                            // Enable Page domain to bypass CSP
+                            let enable_page_request = json!({
+                                "id": 54,
+                                "method": "Page.enable",
+                                "sessionId": session_id
+                            });
+                            write.send(Message::Text(enable_page_request.to_string())).await?;
+                            
+                            let bypass_csp_request = json!({
+                                "id": 55,
+                                "method": "Page.setBypassCSP",
+                                "params": { "enabled": true },
+                                "sessionId": session_id
+                            });
+                            write.send(Message::Text(bypass_csp_request.to_string())).await?;
+                            
+                            // Read all responses until we get past the BypassCSP response
                             while let Some(msg) = read.next().await {
                                 if let Ok(Message::Text(text)) = msg {
                                     if let Ok(response) = serde_json::from_str::<serde_json::Value>(&text) {
-                                        // Check for Input.enable response
+                                        // Check for Page.setBypassCSP response
                                         if let Some(id) = response.get("id").and_then(|v| v.as_u64()) {
-                                            if id == 53 {
+                                            if id == 55 {
                                                 break;
                                             }
                                         }
@@ -723,7 +748,84 @@ impl ChromeBrowser {
         
         Err(anyhow!("Failed to set headers"))
     }
-    
+
+    /// Register a script to run on every new document/frame (Page.addScriptToEvaluateOnNewDocument).
+    /// This is the proper way to inject stealth patches — the script executes before the page's
+    /// own JS, and it applies to every iframe including cross-origin ones (e.g. Google's bframe).
+    pub async fn add_init_script(&mut self, script: &str) -> Result<()> {
+        if let Some(target_id) = &self.target_id {
+            let (ws_stream, _) = connect_async(&self.websocket_url).await?;
+            let (mut write, mut read) = ws_stream.split();
+
+            let attach_request = json!({
+                "id": 400,
+                "method": "Target.attachToTarget",
+                "params": { "targetId": target_id, "flatten": true }
+            });
+            write.send(Message::Text(attach_request.to_string())).await?;
+
+            let mut session_id_str = String::new();
+            while let Some(msg) = read.next().await {
+                if let Ok(Message::Text(text)) = msg {
+                    if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(sid) = resp.get("params").and_then(|p| p.get("sessionId")).and_then(|s| s.as_str()) {
+                            session_id_str = sid.to_string();
+                            break;
+                        }
+                        if let Some(sid) = resp.get("result").and_then(|r| r.get("sessionId")).and_then(|s| s.as_str()) {
+                            session_id_str = sid.to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+            if session_id_str.is_empty() {
+                return Err(anyhow!("add_init_script: failed to get session ID"));
+            }
+
+            // Page.enable is required before addScriptToEvaluateOnNewDocument.
+            let enable_page = json!({
+                "id": 401,
+                "method": "Page.enable",
+                "sessionId": session_id_str
+            });
+            write.send(Message::Text(enable_page.to_string())).await?;
+            // Read until we see id:401 response.
+            while let Some(msg) = read.next().await {
+                if let Ok(Message::Text(text)) = msg {
+                    if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if resp.get("id").and_then(|v| v.as_u64()) == Some(401) { break; }
+                    }
+                }
+            }
+
+            let add_script = json!({
+                "id": 402,
+                "method": "Page.addScriptToEvaluateOnNewDocument",
+                "params": {
+                    "source": script,
+                    "runImmediately": true
+                },
+                "sessionId": session_id_str
+            });
+            write.send(Message::Text(add_script.to_string())).await?;
+            while let Some(msg) = read.next().await {
+                if let Ok(Message::Text(text)) = msg {
+                    if let Ok(resp) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if resp.get("id").and_then(|v| v.as_u64()) == Some(402) {
+                            if let Some(err) = resp.get("error") {
+                                return Err(anyhow!("addScriptToEvaluateOnNewDocument error: {}", err));
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            return Err(anyhow!("add_init_script: no response from CDP"));
+        }
+        Err(anyhow!("add_init_script: no target attached"))
+    }
+
     /// Wait for page to load completely
     pub async fn wait_for_page_load(&mut self, timeout_ms: u64) -> Result<()> {
         let start_time = std::time::Instant::now();
