@@ -254,8 +254,12 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
 
         if is_v2 {
             // ===== RECAPTCHA V2 PATH =====
-            // V2 uses grecaptcha.render() + execute(widgetId) instead of execute(siteKey, {action})
-            // Renders as invisible so no user interaction needed.
+            // Navigate to a minimal URL on the domain (/robots.txt) to avoid loading
+            // the page's own recaptcha widget which conflicts with our injected one.
+            let base_url = req.site_url.trim_end_matches('/');
+            let minimal_url = format!("{}/robots.txt", base_url);
+            let _ = worker.browser.navigate_in_place(&minimal_url).await;
+
             format!(r#"
                 new Promise((resolve, reject) => {{
                     const TIMEOUT = 30000;
@@ -263,22 +267,15 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                     const siteKey = '{site_key}';
                     const apiDomain = '{api_domain}';
 
-                    const origError = console.error;
-                    const origWarn = console.warn;
-                    const handleError = function(...args) {{
-                        const msg = args.join(' ');
-                        if (msg.toLowerCase().includes('site key') || msg.toLowerCase().includes('domain') || msg.toLowerCase().includes('invalid')) {{
-                            clearTimeout(timer);
-                            reject('Google ReCaptcha API Error: ' + msg);
-                        }}
-                        origError.apply(console, args);
-                    }};
-                    console.error = handleError;
-                    console.warn = handleError;
-
                     function injectAndSolve() {{
                         const target = document.head || document.documentElement;
                         if (!target) {{ setTimeout(injectAndSolve, 50); return; }}
+
+                        // Ensure body exists for widget container
+                        if (!document.body) {{
+                            const body = document.createElement('body');
+                            document.documentElement.appendChild(body);
+                        }}
 
                         // Set custom API endpoint if using recaptcha.net
                         if (apiDomain !== 'www.google.com') {{
@@ -309,7 +306,7 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                                                 }},
                                                 'error-callback': () => {{
                                                     clearTimeout(timer);
-                                                    reject('ReCaptcha V2 error callback triggered');
+                                                    reject('ReCaptcha V2: Google rejected this site_key or domain');
                                                 }},
                                                 'expired-callback': () => {{
                                                     clearTimeout(timer);
@@ -320,18 +317,6 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
 
                                             // Execute the invisible captcha
                                             window.grecaptcha.execute(widgetId);
-
-                                            // Safety timeout for V2
-                                            setTimeout(() => {{
-                                                clearTimeout(timer);
-                                                // Try to get token from response field as fallback
-                                                const resp = document.getElementById('g-recaptcha-response');
-                                                if (resp && resp.value) {{
-                                                    resolve(resp.value);
-                                                }} else {{
-                                                    reject('V2: No token received within timeout');
-                                                }}
-                                            }}, 25000);
                                         }} catch(e) {{
                                             clearTimeout(timer);
                                             reject('V2 render error: ' + e.toString());
