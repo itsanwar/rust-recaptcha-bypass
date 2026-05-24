@@ -75,9 +75,22 @@ impl ChromeBrowser {
 
         if headless {
             // Instead of telling Chrome to be headless (which Google detects),
-            // we run it visually but shove the window completely off-screen!
-            // This grants 100% visible fingerprint while keeping the desktop clean.
-            args.push("--window-position=-10000,-10000".to_string());
+            // we run it visually but keep it invisible to the user.
+            // On a VPS with Xvfb (DISPLAY is set), the virtual framebuffer is
+            // already invisible — position at 0,0 so Chrome renders inside the
+            // framebuffer bounds. On a real desktop (Windows/Mac), shove the
+            // window off-screen so the user doesn't see it.
+            if std::env::var("DISPLAY").is_ok() {
+                args.push("--window-position=0,0".to_string());
+            } else {
+                args.push("--window-position=-10000,-10000".to_string());
+            }
+        }
+
+        // Add proxy support if provided
+        if let Ok(proxy_url) = std::env::var("CHROME_PROXY") {
+            args.push(format!("--proxy-server={}", proxy_url));
+            println!("🔒 Using proxy server: {}", proxy_url);
         }
 
         // Launch Chrome with CDP enabled
