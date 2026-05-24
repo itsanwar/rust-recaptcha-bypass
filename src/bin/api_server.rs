@@ -714,6 +714,9 @@ fn build_v2_audio_solver(site_key: &str, api_domain: &str) -> String {
             // ----- Main flow: render widget, then loop attempts -----
             async function run() {{
                 step = 'ensure_dom';
+                if (!document.documentElement) {{
+                    document.appendChild(document.createElement('html'));
+                }}
                 if (!document.body) {{
                     const body = document.createElement('body');
                     document.documentElement.appendChild(body);
