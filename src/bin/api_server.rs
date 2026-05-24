@@ -13,17 +13,27 @@ use hca::ChromeBrowser;
 struct TokenRequest {
     site_url: String,
     site_key: String,
-    #[serde(alias = "pageAction", default = "default_action")]
+    #[serde(default = "default_action")]
     action: String,
-    #[serde(alias = "type", default = "default_task_type")]
-    task_type: String,
-    #[serde(alias = "apiDomain", default = "default_api_domain")]
+    /// "v3" (default), "v2", or "v2invisible"
+    #[serde(default = "default_captcha_type", alias = "type")]
+    captcha_type: String,
+    /// Custom API domain: "www.google.com" (default) or "www.recaptcha.net"
+    #[serde(default = "default_api_domain")]
     api_domain: String,
 }
 
-fn default_action() -> String { "submit".to_string() }
-fn default_task_type() -> String { "ReCaptchaV3TaskProxyLess".to_string() }
-fn default_api_domain() -> String { "www.google.com".to_string() }
+fn default_action() -> String {
+    "submit".to_string()
+}
+
+fn default_captcha_type() -> String {
+    "v3".to_string()
+}
+
+fn default_api_domain() -> String {
+    "www.google.com".to_string()
+}
 
 #[derive(Serialize)]
 struct ExecutionMetrics {
@@ -49,12 +59,11 @@ struct CapSolverTask {
     website_url: String,
     #[serde(rename = "websiteKey")]
     website_key: String,
-    #[serde(rename = "pageAction", default)]
+    #[serde(rename = "pageAction", default = "default_action")]
     page_action: String,
-    #[serde(rename = "apiDomain", default)]
-    api_domain: String,
-    #[serde(default)]
-    anchor: Option<String>,
+    /// Custom API domain for recaptcha.net sites
+    #[serde(rename = "recaptchaDataSValue", default)]
+    recaptcha_data_s_value: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -108,8 +117,6 @@ struct WorkerState {
     browser: ChromeBrowser,
     cached_site_key: Option<String>,
     cached_site_url: Option<String>,
-    cached_task_type: Option<String>,
-    cached_api_domain: Option<String>,
 }
 
 #[tokio::main]
@@ -148,8 +155,6 @@ async fn main() {
                 browser,
                 cached_site_key: None,
                 cached_site_url: None,
-                cached_task_type: None,
-                cached_api_domain: None,
             };
 
             // Pre-navigate to about:blank once
@@ -208,142 +213,151 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
     let total_start = std::time::Instant::now();
 
     let is_cached = worker.cached_site_key.as_deref() == Some(&req.site_key) 
-        && worker.cached_site_url.as_deref() == Some(&req.site_url)
-        && worker.cached_task_type.as_deref() == Some(&req.task_type)
-        && worker.cached_api_domain.as_deref() == Some(&req.api_domain);
+        && worker.cached_site_url.as_deref() == Some(&req.site_url);
 
-    let is_v2 = req.task_type == "ReCaptchaV2TaskProxyLess";
+    // Detect V2 vs V3
+    let is_v2 = req.captcha_type.to_lowercase().contains("v2");
+    let api_base = &req.api_domain;
 
-    let script = if is_cached {
-        // ⚡ FAST PATH: recaptcha API is already loaded with this site_key/domain/type.
-        if is_v2 {
-            format!(r#"
-                new Promise((resolve, reject) => {{
-                    const timer = setTimeout(() => reject('Timeout: execution exceeded 15s'), 15000);
-                    const execTimer = setTimeout(() => {{
+    let script = if is_cached && !is_v2 {
+        // ⚡ FAST PATH (V3 only): recaptcha API is already loaded with this site_key.
+        format!(r#"
+            new Promise((resolve, reject) => {{
+                const timer = setTimeout(() => reject('Timeout: execution exceeded 15s'), 15000);
+                
+                const origError = console.error;
+                const origWarn = console.warn;
+                const handleError = function(...args) {{
+                    const msg = args.join(' ');
+                    if (msg.toLowerCase().includes('site key') || msg.toLowerCase().includes('domain') || msg.toLowerCase().includes('invalid')) {{
                         clearTimeout(timer);
-                        reject('Google ReCaptcha API Error: Invalid site_key, unauthorized domain, or Google dropped the request.');
-                    }}, 7000);
-                    
-                    window.onRecaptchaSuccess = function(token) {{
-                        clearTimeout(timer);
-                        clearTimeout(execTimer);
-                        resolve(token);
-                    }};
-
-                    try {{
-                        const widgetId = window.grecaptcha.render(document.createElement('div'), {{
-                            'sitekey': '{}',
-                            'size': 'invisible',
-                            'callback': window.onRecaptchaSuccess,
-                            'error-callback': function() {{ clearTimeout(timer); clearTimeout(execTimer); reject('V2 error callback'); }}
-                        }});
-                        window.grecaptcha.execute(widgetId);
-                    }} catch (e) {{
-                        clearTimeout(timer);
-                        clearTimeout(execTimer);
-                        reject('V2 render error: ' + e.toString());
+                        reject('Google ReCaptcha API Error: ' + msg);
                     }}
-                }})
-            "#, req.site_key)
-        } else {
-            format!(r#"
-                new Promise((resolve, reject) => {{
-                    const timer = setTimeout(() => reject('Timeout: execution exceeded 15s'), 15000);
-                    
-                    const origError = console.error;
-                    const origWarn = console.warn;
-                    const handleError = function(...args) {{
-                        const msg = args.join(' ');
-                        if (msg.toLowerCase().includes('site key') || msg.toLowerCase().includes('domain') || msg.toLowerCase().includes('invalid')) {{
-                            clearTimeout(timer);
-                            reject('Google ReCaptcha API Error: ' + msg);
-                        }}
-                        origError.apply(console, args);
-                    }};
-                    console.error = handleError;
-                    console.warn = handleError;
+                    origError.apply(console, args);
+                }};
+                console.error = handleError;
+                console.warn = handleError;
 
-                    const execTimer = setTimeout(() => {{
-                        clearTimeout(timer);
-                        reject('Google ReCaptcha API Error: Invalid site_key, unauthorized domain, or Google dropped the request.');
-                    }}, 7000);
+                const execTimer = setTimeout(() => {{
+                    clearTimeout(timer);
+                    reject('Google ReCaptcha API Error: Invalid site_key, unauthorized domain, or Google dropped the request.');
+                }}, 7000);
 
-                    window.grecaptcha.execute('{}', {{action: '{}'}})
-                        .then(token => {{ clearTimeout(timer); clearTimeout(execTimer); resolve(token); }})
-                        .catch(e => {{ clearTimeout(timer); clearTimeout(execTimer); reject(e.toString()); }});
-                }})
-            "#, req.site_key, req.action)
-        }
+                window.grecaptcha.execute('{}', {{action: '{}'}})
+                    .then(token => {{ clearTimeout(timer); clearTimeout(execTimer); resolve(token); }})
+                    .catch(e => {{ clearTimeout(timer); clearTimeout(execTimer); reject(e.toString()); }});
+            }})
+        "#, req.site_key, req.action)
     } else {
-        // 🐢 COLD PATH: Need to reload page and inject recaptcha API fresh.
+        // 🐢 COLD PATH: Navigate and inject recaptcha API fresh.
         let _ = worker.browser.navigate_in_place(&req.site_url).await;
 
         if is_v2 {
+            // ===== RECAPTCHA V2 PATH =====
+            // V2 uses grecaptcha.render() + execute(widgetId) instead of execute(siteKey, {action})
+            // Renders as invisible so no user interaction needed.
             format!(r#"
                 new Promise((resolve, reject) => {{
-                    const TIMEOUT = 15000;
-                    const timer = setTimeout(() => reject('Timeout: token generation exceeded 15s'), TIMEOUT);
-                    const siteKey = '{}';
-                    const domain = '{}';
+                    const TIMEOUT = 30000;
+                    const timer = setTimeout(() => reject('Timeout: V2 token generation exceeded 30s'), TIMEOUT);
+                    const siteKey = '{site_key}';
+                    const apiDomain = '{api_domain}';
 
-                    window.onRecaptchaSuccess = function(token) {{
-                        clearTimeout(timer);
-                        resolve(token);
-                    }};
-
-                    function doExecute() {{
-                        const execTimer = setTimeout(() => {{
+                    const origError = console.error;
+                    const origWarn = console.warn;
+                    const handleError = function(...args) {{
+                        const msg = args.join(' ');
+                        if (msg.toLowerCase().includes('site key') || msg.toLowerCase().includes('domain') || msg.toLowerCase().includes('invalid')) {{
                             clearTimeout(timer);
-                            reject('Google ReCaptcha API Error: Invalid site_key, unauthorized domain, or Google dropped the request.');
-                        }}, 7000);
-
-                        try {{
-                            const div = document.createElement('div');
-                            document.body.appendChild(div);
-                            const widgetId = window.grecaptcha.render(div, {{
-                                'sitekey': siteKey,
-                                'size': 'invisible',
-                                'callback': function(token) {{ clearTimeout(execTimer); window.onRecaptchaSuccess(token); }},
-                                'error-callback': function() {{ clearTimeout(execTimer); reject('V2 error callback'); }}
-                            }});
-                            window.grecaptcha.execute(widgetId);
-                        }} catch (e) {{
-                            clearTimeout(execTimer);
-                            reject('V2 render error: ' + e.toString());
+                            reject('Google ReCaptcha API Error: ' + msg);
                         }}
-                    }}
+                        origError.apply(console, args);
+                    }};
+                    console.error = handleError;
+                    console.warn = handleError;
 
-                    function poll() {{
-                        if (typeof window.grecaptcha !== 'undefined' && typeof window.grecaptcha.render === 'function') {{
-                            window.grecaptcha.ready(doExecute);
-                        }} else {{
-                            setTimeout(poll, 10);
-                        }}
-                    }}
-
-                    function injectScript() {{
+                    function injectAndSolve() {{
                         const target = document.head || document.documentElement;
-                        if (target) {{
-                            const s = document.createElement('script');
-                            s.src = `https://${{domain}}/recaptcha/api.js?render=explicit`;
-                            s.onerror = () => {{ clearTimeout(timer); reject('Failed to load recaptcha api.js'); }};
-                            target.appendChild(s);
-                            poll();
-                        }} else {{
-                            setTimeout(injectScript, 10);
+                        if (!target) {{ setTimeout(injectAndSolve, 50); return; }}
+
+                        // Set custom API endpoint if using recaptcha.net
+                        if (apiDomain !== 'www.google.com') {{
+                            window.__recaptcha_api = 'https://' + apiDomain + '/recaptcha/api2/';
                         }}
+
+                        const s = document.createElement('script');
+                        s.src = 'https://' + apiDomain + '/recaptcha/api.js?render=explicit';
+                        s.onerror = () => {{ clearTimeout(timer); reject('Failed to load recaptcha api.js from ' + apiDomain); }};
+                        s.onload = () => {{
+                            function waitReady() {{
+                                if (typeof window.grecaptcha !== 'undefined' && typeof window.grecaptcha.render === 'function') {{
+                                    window.grecaptcha.ready(() => {{
+                                        try {{
+                                            // Create container for the widget
+                                            let container = document.getElementById('rc-container');
+                                            if (!container) {{
+                                                container = document.createElement('div');
+                                                container.id = 'rc-container';
+                                                document.body.appendChild(container);
+                                            }}
+
+                                            const widgetId = window.grecaptcha.render('rc-container', {{
+                                                sitekey: siteKey,
+                                                callback: (token) => {{
+                                                    clearTimeout(timer);
+                                                    resolve(token);
+                                                }},
+                                                'error-callback': () => {{
+                                                    clearTimeout(timer);
+                                                    reject('ReCaptcha V2 error callback triggered');
+                                                }},
+                                                'expired-callback': () => {{
+                                                    clearTimeout(timer);
+                                                    reject('ReCaptcha V2 token expired');
+                                                }},
+                                                size: 'invisible'
+                                            }});
+
+                                            // Execute the invisible captcha
+                                            window.grecaptcha.execute(widgetId);
+
+                                            // Safety timeout for V2
+                                            setTimeout(() => {{
+                                                clearTimeout(timer);
+                                                // Try to get token from response field as fallback
+                                                const resp = document.getElementById('g-recaptcha-response');
+                                                if (resp && resp.value) {{
+                                                    resolve(resp.value);
+                                                }} else {{
+                                                    reject('V2: No token received within timeout');
+                                                }}
+                                            }}, 25000);
+                                        }} catch(e) {{
+                                            clearTimeout(timer);
+                                            reject('V2 render error: ' + e.toString());
+                                        }}
+                                    }});
+                                }} else {{
+                                    setTimeout(waitReady, 100);
+                                }}
+                            }}
+                            waitReady();
+                        }};
+                        target.appendChild(s);
                     }}
-                    injectScript();
+                    injectAndSolve();
                 }})
-            "#, req.site_key, req.api_domain)
+            "#,
+            site_key = req.site_key,
+            api_domain = api_base)
         } else {
+            // ===== RECAPTCHA V3 PATH =====
             format!(r#"
                 new Promise((resolve, reject) => {{
                     const TIMEOUT = 15000;
                     const timer = setTimeout(() => reject('Timeout: token generation exceeded 15s'), TIMEOUT);
-                    const siteKey = '{}';
-                    const domain = '{}';
+                    const siteKey = '{site_key}';
+                    const apiDomain = '{api_domain}';
 
                     const origError = console.error;
                     const origWarn = console.warn;
@@ -364,7 +378,7 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                             reject('Google ReCaptcha API Error: Invalid site_key, unauthorized domain, or Google dropped the request.');
                         }}, 7000);
 
-                        window.grecaptcha.execute(siteKey, {{action: '{}'}})
+                        window.grecaptcha.execute(siteKey, {{action: '{action}'}})
                             .then(token => {{ clearTimeout(timer); clearTimeout(execTimer); resolve(token); }})
                             .catch(e => {{ clearTimeout(timer); clearTimeout(execTimer); reject('grecaptcha.execute failed: ' + e.toString()); }});
                     }}
@@ -373,7 +387,7 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                         if (typeof window.grecaptcha !== 'undefined' && typeof window.grecaptcha.execute === 'function') {{
                             window.grecaptcha.ready(doExecute);
                         }} else {{
-                            setTimeout(poll, 10);
+                            setTimeout(poll, 100);
                         }}
                     }}
 
@@ -381,17 +395,20 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                         const target = document.head || document.documentElement;
                         if (target) {{
                             const s = document.createElement('script');
-                            s.src = `https://${{domain}}/recaptcha/api.js?render=` + siteKey;
+                            s.src = 'https://' + apiDomain + '/recaptcha/api.js?render=' + siteKey;
                             s.onerror = () => {{ clearTimeout(timer); reject('Failed to load recaptcha api.js'); }};
                             target.appendChild(s);
                             poll();
                         }} else {{
-                            setTimeout(injectScript, 10);
+                            setTimeout(injectScript, 50);
                         }}
                     }}
                     injectScript();
                 }})
-            "#, req.site_key, req.api_domain, req.action)
+            "#,
+            site_key = req.site_key,
+            action = req.action,
+            api_domain = api_base)
         }
     };
 
@@ -405,19 +422,15 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                 // Invalidate cache on failure
                 worker.cached_site_key = None;
                 worker.cached_site_url = None;
-                worker.cached_task_type = None;
-                worker.cached_api_domain = None;
                 TokenResponse {
                     token: None,
                     error: Some(format!("Received empty token after {}ms", total_ms)),
                     metrics: None,
                 }
             } else {
-                // Cache this state for future fast-path requests
+                // Cache this site_key and site_url for future fast-path requests
                 worker.cached_site_key = Some(req.site_key.clone());
                 worker.cached_site_url = Some(req.site_url.clone());
-                worker.cached_task_type = Some(req.task_type.clone());
-                worker.cached_api_domain = Some(req.api_domain.clone());
                 let path = if is_cached { "⚡ cached" } else { "🐢 cold" };
                 println!("  ✅ [{}] Token in {}ms (script: {}ms, {} chars)", path, total_ms, script_ms, token.len());
                 TokenResponse {
@@ -437,8 +450,6 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
         Err(e) => {
             worker.cached_site_key = None;
             worker.cached_site_url = None;
-            worker.cached_task_type = None;
-            worker.cached_api_domain = None;
             TokenResponse {
                 token: None,
                 error: Some(format!("Script execution failed: {}", e)),
@@ -495,12 +506,26 @@ async fn create_task(
         });
     }
 
+    // Auto-detect V2 vs V3 from CapSolver task type
+    let captcha_type = if payload.task.task_type.contains("V2") || payload.task.task_type.contains("v2") {
+        "v2".to_string()
+    } else {
+        "v3".to_string()
+    };
+
+    // Detect API domain from task type or default
+    let api_domain = if payload.task.task_type.contains("recaptcha.net") {
+        "www.recaptcha.net".to_string()
+    } else {
+        "www.google.com".to_string()
+    };
+
     let req = TokenRequest {
         site_url: payload.task.website_url.clone(),
         site_key: payload.task.website_key.clone(),
-        action: if payload.task.page_action.is_empty() { "submit".to_string() } else { payload.task.page_action.clone() },
-        task_type: payload.task.task_type.clone(),
-        api_domain: if payload.task.api_domain.is_empty() { "www.google.com".to_string() } else { payload.task.api_domain.clone() },
+        action: payload.task.page_action.clone(),
+        captcha_type,
+        api_domain,
     };
 
     let (resp_tx, resp_rx) = oneshot::channel();
