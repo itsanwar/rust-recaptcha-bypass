@@ -254,20 +254,18 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
 
         if is_v2 {
             // ===== RECAPTCHA V2 PATH =====
-            // Navigate to a minimal URL on the domain (/robots.txt) to avoid loading
-            // the page's own recaptcha widget which conflicts with our injected one.
-            let base_url = req.site_url.trim_end_matches('/');
-            let minimal_url = format!("{}/robots.txt", base_url);
-            let _ = worker.browser.navigate_in_place(&minimal_url).await;
-
+            // Navigate to the actual site URL (Google validates origin against registered domains).
+            // V2 uses grecaptcha.render() + execute(widgetId) with size:'invisible'.
             format!(r#"
                 new Promise((resolve, reject) => {{
-                    const TIMEOUT = 30000;
-                    const timer = setTimeout(() => reject('Timeout: V2 token generation exceeded 30s'), TIMEOUT);
+                    const TIMEOUT = 20000;
+                    let step = 'init';
+                    const timer = setTimeout(() => reject('V2 Timeout at step: ' + step), TIMEOUT);
                     const siteKey = '{site_key}';
                     const apiDomain = '{api_domain}';
 
                     function injectAndSolve() {{
+                        step = 'waiting_for_dom';
                         const target = document.head || document.documentElement;
                         if (!target) {{ setTimeout(injectAndSolve, 50); return; }}
 
@@ -282,14 +280,17 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                             window.__recaptcha_api = 'https://' + apiDomain + '/recaptcha/api2/';
                         }}
 
+                        step = 'loading_api_js';
                         const s = document.createElement('script');
                         s.src = 'https://' + apiDomain + '/recaptcha/api.js?render=explicit';
-                        s.onerror = () => {{ clearTimeout(timer); reject('Failed to load recaptcha api.js from ' + apiDomain); }};
+                        s.onerror = () => {{ clearTimeout(timer); reject('V2: Failed to load api.js from ' + apiDomain); }};
                         s.onload = () => {{
+                            step = 'api_loaded_waiting_grecaptcha';
                             function waitReady() {{
                                 if (typeof window.grecaptcha !== 'undefined' && typeof window.grecaptcha.render === 'function') {{
                                     window.grecaptcha.ready(() => {{
                                         try {{
+                                            step = 'rendering_widget';
                                             // Create container for the widget
                                             let container = document.getElementById('rc-container');
                                             if (!container) {{
@@ -306,20 +307,30 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
                                                 }},
                                                 'error-callback': () => {{
                                                     clearTimeout(timer);
-                                                    reject('ReCaptcha V2: Google rejected this site_key or domain');
+                                                    reject('V2: Google error-callback (bad site_key or domain)');
                                                 }},
                                                 'expired-callback': () => {{
                                                     clearTimeout(timer);
-                                                    reject('ReCaptcha V2 token expired');
+                                                    reject('V2: Token expired');
                                                 }},
                                                 size: 'invisible'
                                             }});
 
-                                            // Execute the invisible captcha
+                                            step = 'executing_widget_' + widgetId;
                                             window.grecaptcha.execute(widgetId);
+
+                                            // Fallback: check g-recaptcha-response field after 10s
+                                            setTimeout(() => {{
+                                                const resp = document.getElementById('g-recaptcha-response');
+                                                if (resp && resp.value && resp.value.length > 20) {{
+                                                    clearTimeout(timer);
+                                                    resolve(resp.value);
+                                                }}
+                                                step = 'waiting_for_callback_after_execute';
+                                            }}, 10000);
                                         }} catch(e) {{
                                             clearTimeout(timer);
-                                            reject('V2 render error: ' + e.toString());
+                                            reject('V2 render error at step ' + step + ': ' + e.toString());
                                         }}
                                     }});
                                 }} else {{
