@@ -629,10 +629,10 @@ fn build_v2_audio_solver(site_key: &str, api_domain: &str) -> String {
                 );
 
                 step = 'attempt_' + attemptIdx + '_click_audio_btn';
-                if (audioBtn.style.display !== 'none') {
+                if (audioBtn.style.display !== 'none') {{
                     await sleep(rand(200, 400));  // give Google's JS time to bind the click listener
                     humanClick(audioBtn, iwin);
-                }
+                }}
 
                 // After clicking audio, Google often shows the block instead of a clip.
                 await sleep(rand(100, 200));
