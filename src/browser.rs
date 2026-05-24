@@ -69,7 +69,7 @@ impl ChromeBrowser {
             "--disable-features=TranslateUI,BlinkGenPropertyTrees".to_string(),
             format!("--window-size={},{}", width, height),
             "--force-device-scale-factor=1".to_string(),
-            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36".to_string(),
+            "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36".to_string(),
             "about:blank".to_string(),
         ];
 

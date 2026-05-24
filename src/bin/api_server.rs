@@ -50,16 +50,6 @@ const STEALTH_INIT_SCRIPT: &str = r#"
         Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
     } catch(e) {}
 
-    try {
-        Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
-    } catch(e) {}
-
-    try {
-        if (navigator.userAgentData) {
-            Object.defineProperty(navigator.userAgentData, 'platform', { get: () => 'Windows' });
-        }
-    } catch(e) {}
-
     // window.chrome — headless Chrome has this empty; populate to match real Chrome.
     try {
         if (!window.chrome || !window.chrome.runtime) {
@@ -354,10 +344,7 @@ async fn process_request(worker: &mut WorkerState, req: &TokenRequest) -> TokenR
 
     let script_start = std::time::Instant::now();
 
-    // Use full execute_script for ALL requests to ensure CSP bypass works.
-    let exec_res = worker.browser.execute_script(&script).await;
-
-    match exec_res {
+    match worker.browser.execute_script_fast(&script).await {
         Ok(token) => {
             let script_ms = script_start.elapsed().as_millis();
             let total_ms = total_start.elapsed().as_millis();
@@ -641,14 +628,14 @@ fn build_v2_audio_solver(site_key: &str, api_domain: &str) -> String {
                     idoc, 5000, 'audio_button'
                 );
 
-                step = 'attempt_' + attemptIdx + '_click_audio_btn';
-                if (audioBtn.style.display !== 'none') {{
-                    await sleep(rand(200, 400));  // give Google's JS time to bind the click listener
+                if (attemptIdx === 0) {{
+                    step = 'attempt_' + attemptIdx + '_click_audio_btn';
+                    await sleep(rand(30, 80));  // tiny pause before clicking
                     humanClick(audioBtn, iwin);
                 }}
 
                 // After clicking audio, Google often shows the block instead of a clip.
-                await sleep(rand(100, 200));
+                await sleep(rand(20, 50));
                 const postClickBlock = detectBlock(idoc);
                 if (postClickBlock) throw new Error(BLOCK_SENTINEL + ': ' + postClickBlock);
 
@@ -807,8 +794,6 @@ fn build_v2_audio_solver(site_key: &str, api_domain: &str) -> String {
                 // Attempt loop with refresh-on-failure
                 for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {{
                     try {{
-                        iwin = bframe.contentWindow;
-                        idoc = iwin.document;
                         const outcome = await solveOnce(idoc, iwin, attempt);
                         if (outcome.ok) return finish(outcome.token);
                         if (attempt < MAX_ATTEMPTS - 1) {{
