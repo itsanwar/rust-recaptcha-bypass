@@ -50,6 +50,16 @@ const STEALTH_INIT_SCRIPT: &str = r#"
         Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
     } catch(e) {}
 
+    try {
+        Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+    } catch(e) {}
+
+    try {
+        if (navigator.userAgentData) {
+            Object.defineProperty(navigator.userAgentData, 'platform', { get: () => 'Windows' });
+        }
+    } catch(e) {}
+
     // window.chrome — headless Chrome has this empty; populate to match real Chrome.
     try {
         if (!window.chrome || !window.chrome.runtime) {
